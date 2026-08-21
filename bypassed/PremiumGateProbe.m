@@ -2,6 +2,7 @@
 #import <objc/runtime.h>
 #import <os/log.h>
 
+// Device-test target: iPhone 17 Pro Max. The probe is observational only.
 static NSString * const BCProbeKey = @"__sys_ui_shown";
 static IMP BCOriginalObjectForKey = NULL;
 
