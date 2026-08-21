@@ -1,0 +1,75 @@
+name: Verify dylib hypothesis
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'original/**'
+      - 'verification/**'
+      - 'analysis/**'
+      - '.github/workflows/verify.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify-and-build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show Xcode toolchain
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Verify supplied original binary
+        run: |
+          python3 analysis/verify_original.py original/PinterestPatch.dylib | tee original-verification.txt
+
+      - name: Build diagnostic iOS arm64 dylib
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          CLANG="$(xcrun --sdk iphoneos --find clang)"
+
+          "$CLANG" \
+            -target arm64-apple-ios13.0 \
+            -isysroot "$SDK" \
+            -fobjc-arc \
+            -fvisibility=hidden \
+            -dynamiclib \
+            -framework Foundation \
+            -Wl,-install_name,@rpath/PremiumGateProbe.dylib \
+            verification/PremiumGateProbe.m \
+            -o build/PremiumGateProbe.dylib
+
+          codesign --force --sign - build/PremiumGateProbe.dylib
+          file build/PremiumGateProbe.dylib
+          shasum -a 256 build/PremiumGateProbe.dylib | tee build/SHA256SUMS
+
+      - name: Record binary metadata
+        run: |
+          xcrun llvm-objdump --macho --private-headers build/PremiumGateProbe.dylib > build/macho-headers.txt
+          nm -gU build/PremiumGateProbe.dylib > build/exported-symbols.txt || true
+
+          if [ -f original/PinterestPatch.dylib ]; then
+            file original/PinterestPatch.dylib > build/original-file.txt
+            shasum -a 256 original/PinterestPatch.dylib > build/original-sha256.txt
+            xcrun llvm-objdump --macho --private-headers original/PinterestPatch.dylib > build/original-macho-headers.txt
+          fi
+
+      - name: Upload verification artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dylib-verification-${{ github.sha }}
+          if-no-files-found: error
+          path: |
+            build/PremiumGateProbe.dylib
+            build/SHA256SUMS
+            build/*.txt
+            original-verification.txt
