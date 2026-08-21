@@ -1,97 +1,119 @@
-name: Verify dylib hypothesis
+name: Build Premium Gate Probe
 
 on:
   workflow_dispatch:
   push:
     paths:
+      - 'bypassed/PremiumGateProbe.m'
       - 'original/**'
-      - 'verification/**'
-      - 'bypassed/**'
-      - 'analysis/**'
-      - '.github/workflows/verify.yml'
-  pull_request:
-    paths:
-      - 'original/**'
-      - 'verification/**'
-      - 'bypassed/**'
-      - 'analysis/**'
       - '.github/workflows/verify.yml'
 
 permissions:
   contents: read
 
 jobs:
-  verify-and-build:
-    runs-on: macos-latest
+  build-probe:
+    runs-on: macos-26
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Show Xcode toolchain
-        run: |
-          xcodebuild -version
-          xcrun --sdk iphoneos --show-sdk-version
-
-      - name: Verify supplied original binary
-        run: |
-          python3 analysis/verify_original.py original/PinterestPatch.dylib | tee original-verification.txt
-
-      - name: Build diagnostic and bypass iOS arm64 dylibs
+      - name: Select stable Apple toolchain
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p build bypassed
+          if [ -d /Applications/Xcode_26.6.app ]; then
+            sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
+          fi
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          xcrun --sdk iphoneos --show-sdk-path
+
+      - name: Verify original fingerprint when binary is present
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f original/PinterestPatch.dylib ]; then
+            EXPECTED="bd86770c05e8a290d9b729f8922c3f3f8fde737e8463c79d4bf4dbc4d86ce017"
+            ACTUAL="$(shasum -a 256 original/PinterestPatch.dylib | awk '{print $1}')"
+            echo "expected=$EXPECTED"
+            echo "actual=$ACTUAL"
+            test "$ACTUAL" = "$EXPECTED"
+          else
+            echo "original/PinterestPatch.dylib is not committed; fingerprint metadata remains available in original/."
+          fi
+
+      - name: Build iPhoneOS diagnostic dylib
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/arm64 build/arm64e build/final
+
           SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
           CLANG="$(xcrun --sdk iphoneos --find clang)"
+          SOURCE="bypassed/PremiumGateProbe.m"
 
-          COMMON_FLAGS=(
-            -target arm64-apple-ios13.0
+          COMMON=(
             -isysroot "$SDK"
             -fobjc-arc
             -fvisibility=hidden
             -dynamiclib
             -framework Foundation
+            -Wl,-dead_strip
+            -Wl,-install_name,@rpath/PremiumGateProbe.dylib
           )
 
-          "$CLANG" "${COMMON_FLAGS[@]}" \
-            -Wl,-install_name,@rpath/PremiumGateProbe.dylib \
-            verification/PremiumGateProbe.m \
-            -o build/PremiumGateProbe.dylib
+          "$CLANG" \
+            -target arm64-apple-ios13.0 \
+            "${COMMON[@]}" \
+            "$SOURCE" \
+            -o build/arm64/PremiumGateProbe.dylib
 
-          "$CLANG" "${COMMON_FLAGS[@]}" \
-            -Wl,-install_name,@rpath/PremiumBypass.dylib \
-            bypassed/PremiumBypass.m \
-            -o bypassed/PremiumBypass.dylib
-
-          codesign --force --sign - build/PremiumGateProbe.dylib
-          codesign --force --sign - bypassed/PremiumBypass.dylib
-
-          file build/PremiumGateProbe.dylib
-          file bypassed/PremiumBypass.dylib
-          shasum -a 256 build/PremiumGateProbe.dylib bypassed/PremiumBypass.dylib | tee build/SHA256SUMS
-
-      - name: Record binary metadata
-        run: |
-          xcrun llvm-objdump --macho --private-headers build/PremiumGateProbe.dylib > build/probe-macho-headers.txt
-          xcrun llvm-objdump --macho --private-headers bypassed/PremiumBypass.dylib > build/bypass-macho-headers.txt
-          nm -gU build/PremiumGateProbe.dylib > build/probe-exported-symbols.txt || true
-          nm -gU bypassed/PremiumBypass.dylib > build/bypass-exported-symbols.txt || true
-
-          if [ -f original/PinterestPatch.dylib ]; then
-            file original/PinterestPatch.dylib > build/original-file.txt
-            shasum -a 256 original/PinterestPatch.dylib > build/original-sha256.txt
-            xcrun llvm-objdump --macho --private-headers original/PinterestPatch.dylib > build/original-macho-headers.txt
+          FINAL="build/final/PremiumGateProbe.dylib"
+          if "$CLANG" \
+            -target arm64e-apple-ios13.0 \
+            "${COMMON[@]}" \
+            "$SOURCE" \
+            -o build/arm64e/PremiumGateProbe.dylib; then
+            xcrun lipo -create \
+              build/arm64/PremiumGateProbe.dylib \
+              build/arm64e/PremiumGateProbe.dylib \
+              -output "$FINAL"
+          else
+            echo "arm64e slice unavailable in this toolchain; publishing arm64, which is the required third-party iOS app ABI."
+            cp build/arm64/PremiumGateProbe.dylib "$FINAL"
           fi
 
-      - name: Upload verification artifact
+          codesign --force --sign - --timestamp=none "$FINAL"
+
+      - name: Validate dylib
+        shell: bash
+        run: |
+          set -euo pipefail
+          DYLIB="build/final/PremiumGateProbe.dylib"
+          {
+            echo "=== file ==="
+            file "$DYLIB"
+            echo
+            echo "=== architectures ==="
+            xcrun lipo -info "$DYLIB" || true
+            echo
+            echo "=== linked libraries ==="
+            otool -L "$DYLIB"
+            echo
+            echo "=== code signature ==="
+            codesign -dv --verbose=4 "$DYLIB" 2>&1 || true
+            echo
+            echo "=== sha256 ==="
+            shasum -a 256 "$DYLIB"
+          } | tee build/final/build-manifest.txt
+
+      - name: Upload device-test artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dylib-verification-${{ github.sha }}
+          name: PremiumGateProbe-iPhoneOS-${{ github.run_number }}
           if-no-files-found: error
           path: |
-            build/PremiumGateProbe.dylib
-            bypassed/PremiumBypass.dylib
-            build/SHA256SUMS
-            build/*.txt
-            original-verification.txt
+            build/final/PremiumGateProbe.dylib
+            build/final/build-manifest.txt
