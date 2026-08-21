@@ -6,6 +6,14 @@ on:
     paths:
       - 'original/**'
       - 'verification/**'
+      - 'bypassed/**'
+      - 'analysis/**'
+      - '.github/workflows/verify.yml'
+  pull_request:
+    paths:
+      - 'original/**'
+      - 'verification/**'
+      - 'bypassed/**'
       - 'analysis/**'
       - '.github/workflows/verify.yml'
 
@@ -29,33 +37,46 @@ jobs:
         run: |
           python3 analysis/verify_original.py original/PinterestPatch.dylib | tee original-verification.txt
 
-      - name: Build diagnostic iOS arm64 dylib
+      - name: Build diagnostic and bypass iOS arm64 dylibs
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p build
+          mkdir -p build bypassed
           SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
           CLANG="$(xcrun --sdk iphoneos --find clang)"
 
-          "$CLANG" \
-            -target arm64-apple-ios13.0 \
-            -isysroot "$SDK" \
-            -fobjc-arc \
-            -fvisibility=hidden \
-            -dynamiclib \
-            -framework Foundation \
+          COMMON_FLAGS=(
+            -target arm64-apple-ios13.0
+            -isysroot "$SDK"
+            -fobjc-arc
+            -fvisibility=hidden
+            -dynamiclib
+            -framework Foundation
+          )
+
+          "$CLANG" "${COMMON_FLAGS[@]}" \
             -Wl,-install_name,@rpath/PremiumGateProbe.dylib \
             verification/PremiumGateProbe.m \
             -o build/PremiumGateProbe.dylib
 
+          "$CLANG" "${COMMON_FLAGS[@]}" \
+            -Wl,-install_name,@rpath/PremiumBypass.dylib \
+            bypassed/PremiumBypass.m \
+            -o bypassed/PremiumBypass.dylib
+
           codesign --force --sign - build/PremiumGateProbe.dylib
+          codesign --force --sign - bypassed/PremiumBypass.dylib
+
           file build/PremiumGateProbe.dylib
-          shasum -a 256 build/PremiumGateProbe.dylib | tee build/SHA256SUMS
+          file bypassed/PremiumBypass.dylib
+          shasum -a 256 build/PremiumGateProbe.dylib bypassed/PremiumBypass.dylib | tee build/SHA256SUMS
 
       - name: Record binary metadata
         run: |
-          xcrun llvm-objdump --macho --private-headers build/PremiumGateProbe.dylib > build/macho-headers.txt
-          nm -gU build/PremiumGateProbe.dylib > build/exported-symbols.txt || true
+          xcrun llvm-objdump --macho --private-headers build/PremiumGateProbe.dylib > build/probe-macho-headers.txt
+          xcrun llvm-objdump --macho --private-headers bypassed/PremiumBypass.dylib > build/bypass-macho-headers.txt
+          nm -gU build/PremiumGateProbe.dylib > build/probe-exported-symbols.txt || true
+          nm -gU bypassed/PremiumBypass.dylib > build/bypass-exported-symbols.txt || true
 
           if [ -f original/PinterestPatch.dylib ]; then
             file original/PinterestPatch.dylib > build/original-file.txt
@@ -70,6 +91,7 @@ jobs:
           if-no-files-found: error
           path: |
             build/PremiumGateProbe.dylib
+            bypassed/PremiumBypass.dylib
             build/SHA256SUMS
             build/*.txt
             original-verification.txt
