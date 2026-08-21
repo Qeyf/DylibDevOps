@@ -3,6 +3,7 @@
 #import <os/log.h>
 
 // Device-test target: iPhone 17 Pro Max. The probe is observational only.
+// CI verification branch: ci/iphone17-probe-build.
 static NSString * const BCProbeKey = @"__sys_ui_shown";
 static IMP BCOriginalObjectForKey = NULL;
 
