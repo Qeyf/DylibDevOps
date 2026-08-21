@@ -7,6 +7,11 @@ on:
       - 'bypassed/PremiumGateProbe.m'
       - 'original/**'
       - '.github/workflows/verify.yml'
+  pull_request:
+    paths:
+      - 'bypassed/PremiumGateProbe.m'
+      - 'original/**'
+      - '.github/workflows/verify.yml'
 
 permissions:
   contents: read
